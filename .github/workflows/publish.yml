@@ -2,13 +2,13 @@ name: Publish Minecraft Image
 on:
   push:
     tags:
-      - "v*" # Trigger on tags like v1.0, v1.1
+      - "v*"
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Remove the ECR_REGISTRY env from here!
     env:
-      ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
       REPOSITORY: minecraft-server
     steps:
       - name: Checkout
@@ -23,24 +23,29 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
+        id: login-ecr # <--- This ID is the "source" for the registry URL
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Pull, Tag, and Push Image
         env:
-          UPSTREAM_IMAGE: itzg/minecraft-server:latest # Or a specific version like :java17
+          # Pinning to a specific Java version as you requested earlier
+          UPSTREAM_IMAGE: itzg/minecraft-server:java17-alpine
           IMAGE_TAG: ${{ github.ref_name }}
+          # Reference the output directly in the step env
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker pull $UPSTREAM_IMAGE
-          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG
-          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:java17-alpine
+          docker tag $UPSTREAM_IMAGE $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker tag $UPSTREAM_IMAGE $REGISTRY/$REPOSITORY:latest
 
       - name: Smoke Test
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker run -d --name test-server -e EULA=TRUE $ECR_REGISTRY/minecraft-server:${{ github.ref_name }}
+          # Use the variable defined in this step's env
+          docker run -d --name test-server -e EULA=TRUE $REGISTRY/$REPOSITORY:${{ github.ref_name }}
           echo "Waiting for server to initialize..."
-          # Polling loop to check for 'Done' in logs
-          for i in {1..10}; do
+          for i in {1..12}; do
             if docker logs test-server 2>&1 | grep -q "Done"; then
               echo "Smoke test passed!"
               docker rm -f test-server
@@ -54,5 +59,6 @@ jobs:
 
       - name: Push to ECR
         run: |
-          docker push ${{ steps.login-ecr.outputs.registry }}/minecraft-server:${{ github.ref_name }}
-          docker push ${{ steps.login-ecr.outputs.registry }}/minecraft-server:latest
+          # You can also just use the context directly in the command
+          docker push ${{ steps.login-ecr.outputs.registry }}/$REPOSITORY:${{ github.ref_name }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/$REPOSITORY:latest
