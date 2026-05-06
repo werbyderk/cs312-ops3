@@ -23,14 +23,16 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and Tag Image
+      - name: Pull, Tag, and Push Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           REPOSITORY: minecraft-server
+          UPSTREAM_IMAGE: itzg/minecraft-server:latest # Or a specific version like :java17
           IMAGE_TAG: ${{ github.ref_name }}
         run: |
-          docker build -t $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$REPOSITORY:latest
+          docker pull $UPSTREAM_IMAGE
+          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:latest
 
       - name: Smoke Test
         run: |
