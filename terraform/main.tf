@@ -84,7 +84,7 @@ resource "aws_instance" "ops-3-instance" {
   associate_public_ip_address = true
   key_name                    = data.aws_key_pair.ops3_key.key_name
   vpc_security_group_ids      = [aws_security_group.allow_web.id]
-  iam_instance_profile        = aws_iam_instance_profile.lab.name
+  iam_instance_profile        = "LabInstanceProfile"
 
   tags = {
     Name = "web-instance"
