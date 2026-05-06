@@ -7,6 +7,9 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    env:
+      ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      REPOSITORY: minecraft-server
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,14 +28,12 @@ jobs:
 
       - name: Pull, Tag, and Push Image
         env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: minecraft-server
           UPSTREAM_IMAGE: itzg/minecraft-server:latest # Or a specific version like :java17
           IMAGE_TAG: ${{ github.ref_name }}
         run: |
           docker pull $UPSTREAM_IMAGE
           docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG
-          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:latest
+          docker tag $UPSTREAM_IMAGE $ECR_REGISTRY/$REPOSITORY:java17-alpine
 
       - name: Smoke Test
         run: |
