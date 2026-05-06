@@ -1,0 +1,55 @@
+name: Publish Minecraft Image
+on:
+  push:
+    tags:
+      - "v*" # Trigger on tags like v1.0, v1.1
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Tag Image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: minecraft-server
+          IMAGE_TAG: ${{ github.ref_name }}
+        run: |
+          docker build -t $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$REPOSITORY:latest
+
+      - name: Smoke Test
+        run: |
+          docker run -d --name test-server -e EULA=TRUE $ECR_REGISTRY/minecraft-server:${{ github.ref_name }}
+          echo "Waiting for server to initialize..."
+          # Polling loop to check for 'Done' in logs
+          for i in {1..10}; do
+            if docker logs test-server 2>&1 | grep -q "Done"; then
+              echo "Smoke test passed!"
+              docker rm -f test-server
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Smoke test failed!"
+          docker logs test-server
+          exit 1
+
+      - name: Push to ECR
+        run: |
+          docker push ${{ steps.login-ecr.outputs.registry }}/minecraft-server:${{ github.ref_name }}
+          docker push ${{ steps.login-ecr.outputs.registry }}/minecraft-server:latest
