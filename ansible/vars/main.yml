@@ -1,0 +1,13 @@
+ecr_repository: 123456789012.dkr.ecr.us-east-1.amazonaws.com/minecraft
+ecr_image_tag: latest # replace with the exact pinned tag you want, e.g. "1.19.3"
+s3_bucket: my-mc-world-bucket
+s3_world_key: world.tar.gz # object key that contains the world archive
+data_dir: /data # host directory mounted into the container
+container_name: minecraft-server
+container_port: 25565
+eula: "TRUE"
+aws_region: us-east-1
+docker_compose_path: /opt/minecraft/docker-compose.yml # optional, see below
+aws_access_key_id:
+aws_secret_access_key:
+aws_session_token:

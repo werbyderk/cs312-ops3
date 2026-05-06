@@ -1,0 +1,42 @@
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  become: true
+
+- name: Install required packages (Docker, unzip)
+  ansible.builtin.package:
+    name:
+      - docker.io
+      - unzip
+    state: present
+  become: true
+
+- name: Ensure Docker service is running and enabled
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Check if AWS CLI v2 is already installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/aws
+  register: aws_cli_stat
+
+- name: Install AWS CLI v2 (if not present)
+  block:
+    - name: Download AWS CLI v2 installer
+      ansible.builtin.get_url:
+        url: "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+        dest: "/tmp/awscliv2.zip"
+        mode: "0644"
+    - name: Unzip AWS CLI installer
+      ansible.builtin.unarchive:
+        src: "/tmp/awscliv2.zip"
+        dest: "/tmp"
+        remote_src: yes
+    - name: Run AWS CLI installer
+      ansible.builtin.command:
+        cmd: "/tmp/aws/install"
+        creates: "/usr/local/bin/aws"
+  when: not aws_cli_stat.stat.exists

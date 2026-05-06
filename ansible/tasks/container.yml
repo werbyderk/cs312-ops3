@@ -1,0 +1,13 @@
+- name: Ensure Minecraft container is running
+  community.docker.docker_container:
+    name: "{{ container_name }}"
+    image: "{{ ecr_repository }}:{{ ecr_image_tag }}"
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "{{ container_port }}:{{ container_port }}"
+    env:
+      EULA: "{{ eula }}"
+    volumes:
+      - "{{ data_dir }}:/data"
+  become: true

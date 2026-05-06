@@ -1,0 +1,7 @@
+- name: Pull the pinned Minecraft image from ECR
+  community.docker.docker_image:
+    name: "{{ ecr_repository }}"
+    tag: "{{ ecr_image_tag }}"
+    source: pull
+    force_source: false
+  become: true

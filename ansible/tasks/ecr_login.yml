@@ -1,0 +1,17 @@
+- name: Get ECR login password
+  ansible.builtin.command: >
+    aws ecr get-login-password --region {{ aws_region }}
+  register: ecr_login
+  changed_when: false
+  environment:
+    AWS_ACCESS_KEY_ID: "{{ aws_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ aws_secret_access_key }}"
+    AWS_SESSION_TOKEN: "{{ aws_session_token }}"
+    AWS_DEFAULT_REGION: "{{ aws_region }}"
+
+- name: Log in to the ECR registry
+  community.docker.docker_login:
+    registry_url: "{{ ecr_repository.split('/')[0] }}"
+    username: AWS
+    password: "{{ ecr_login.stdout }}"
+  become: true
