@@ -23,37 +23,43 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr # <--- This ID is the "source" for the registry URL
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Pull, Tag, and Push Image
+      - name: Build, Tag, and Push to ECR
         env:
-          UPSTREAM_IMAGE: itzg/minecraft-server:java17-alpine
-          IMAGE_TAG: ${{ github.ref_name }}
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          UPSTREAM: itzg/minecraft-server:java17-alpine
         run: |
-          docker pull $UPSTREAM_IMAGE
-          # Ensure REPOSITORY matches what your Ansible/Terraform expects
-          docker tag $UPSTREAM_IMAGE $REGISTRY/$REPOSITORY:$IMAGE_TAG
-          docker tag $UPSTREAM_IMAGE $REGISTRY/$REPOSITORY:latest
+          # 1. Pull the official image
+          docker pull $UPSTREAM
+
+          # 2. Tag it for your private ECR
+          docker tag $UPSTREAM $REGISTRY/$REPOSITORY:${{ github.ref_name }}
+          docker tag $UPSTREAM $REGISTRY/$REPOSITORY:latest
+
+          # 3. Push to ECR (This is what was missing!)
+          docker push $REGISTRY/$REPOSITORY:${{ github.ref_name }}
+          docker push $REGISTRY/$REPOSITORY:latest
 
       - name: Smoke Test
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          # Added a memory limit so the runner doesn't crash during smoke test
+          # Run the image WE JUST PUSHED to ensure it's valid
           docker run -d --name test-server -m 2g -e EULA=TRUE $REGISTRY/$REPOSITORY:latest
 
-          echo "Waiting for server to initialize..."
+          echo "Waiting for Minecraft to say 'Done'..."
           for i in {1..20}; do
             if docker logs test-server 2>&1 | grep -q "Done"; then
-              echo "Smoke test passed!"
+              echo "✅ Smoke test passed!"
               docker stop test-server && docker rm test-server
               exit 0
             fi
-            echo "Still starting... ($i/20)"
+            echo "Attempt $i: Server still starting..."
             sleep 10
           done
-          echo "Smoke test failed!"
+
+          echo "❌ Smoke test failed!"
           docker logs test-server
           exit 1
