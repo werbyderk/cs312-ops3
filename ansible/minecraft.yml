@@ -1,177 +1,119 @@
-# ansible/playbook.yml
+---
 - name: Deploy Minecraft server
   hosts: all
   become: true
   vars_files:
     - vars/main.yml
 
-  # -----------------------------------------------------------------
-  # GLOBAL PLAYBOOK SETTINGS
-  # -----------------------------------------------------------------
-  environment:
-    # Prevent host‑key checking when the EC2 instance is freshly created.
-    ANSIBLE_HOST_KEY_CHECKING: "False"
-    # Ensure the AWS CLI picks up the instance‑profile credentials automatically.
-    AWS_DEFAULT_REGION: "{{ aws_region }}"
-
-  # -----------------------------------------------------------------
-  # PLAYBOOK TASKS
-  # -----------------------------------------------------------------
   tasks:
     # -----------------------------------------------------------------
-    # 1️⃣ Install required packages (Docker, Docker‑compose, AWS CLI, unzip)
+    # 1️⃣ Standard Prerequisites
     # -----------------------------------------------------------------
-    - name: Install apt packages required for Docker and AWS CLI
+    - name: Install system dependencies
       apt:
-        name:
-          - docker.io
-          - docker-compose
-          - unzip
-          - python3-pip # needed for the Ansible Docker modules
-          - curl
+        name: [python3-venv, docker.io, unzip, curl]
         state: present
         update_cache: yes
-      register: apt_install
-      changed_when: apt_install.changed
 
-    - name: Install required Python packages for Ansible Docker modules
-      pip:
-        name:
-          - docker # python‑docker SDK used by community.docker collection
-          - boto3 # AWS SDK (used by aws_s3 module)
-        state: present
-      when: apt_install.changed
-
-    # -----------------------------------------------------------------
-    # 2️⃣ Ensure the Docker service is running and enabled at boot
-    # -----------------------------------------------------------------
-    - name: Enable and start Docker daemon
+    - name: Ensure Docker is started
       systemd:
         name: docker
-        enabled: true
         state: started
+        enabled: true
+
+    - name: Add ubuntu to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
 
     # -----------------------------------------------------------------
-    # 3️⃣ Authenticate Docker to the private ECR repository
-    #    (uses the instance‑profile – no static keys required)
+    # 2️⃣ Install AWS CLI v2 (System-wide)
     # -----------------------------------------------------------------
-    - name: Get ECR login password
-      command: >
-        aws ecr get-login-password
-        --region {{ aws_region }}
-      register: ecr_login_password
+    - name: Check for AWS CLI
+      command: aws --version
+      register: aws_check
+      ignore_errors: true
       changed_when: false
-      no_log: true # hide the password in logs
 
-    - name: Log Docker into the ECR registry
-      docker_login:
-        registry_url: "{{ ecr_repository.split('/') | first }}"
-        username: AWS
-        password: "{{ ecr_login_password.stdout }}"
-      no_log: true
+    - name: Install AWS CLI if missing
+      when: aws_check.rc != 0
+      block:
+        - name: Download AWS CLI
+          get_url:
+            url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+            dest: /tmp/awscliv2.zip
+        - name: Unarchive and Install
+          unarchive:
+            src: /tmp/awscliv2.zip
+            dest: /tmp
+            remote_src: yes
+        - name: Run installer
+          command: /tmp/aws/install --update
 
     # -----------------------------------------------------------------
-    # 4️⃣ Restore the Minecraft world from S3 (if an archive exists)
+    # 3️⃣ Authenticate to ECR (Bypassing the buggy docker_login module)
     # -----------------------------------------------------------------
-    - name: Ensure the data directory exists
+    - name: Log Docker into ECR via Shell
+      shell: |
+        aws ecr get-login-password --region {{ aws_region }} | \
+        docker login --username AWS --password-stdin {{ ecr_repository.split('/') | first }}
+      changed_when: false
+      # We use shell here because the community.docker.docker_login module
+      # is triggering the "http+docker" scheme error on Ubuntu 24.04.
+
+    # -----------------------------------------------------------------
+    # 4️⃣ Restore World Data
+    # -----------------------------------------------------------------
+    - name: Ensure data directory exists
       file:
         path: "{{ data_dir }}"
         state: directory
         mode: "0755"
 
-    - name: Download world archive from S3 (if it exists)
-      aws_s3:
-        bucket: "{{ s3_bucket }}"
-        object: "{{ s3_world_key }}"
-        dest: "/tmp/{{ s3_world_key | basename }}"
-        mode: get
-        overwrite: yes
-      register: s3_download
-      ignore_errors: true # If the object does not exist yet, we just skip extraction
+    - name: Pull world from S3 (bypassing python-s3 modules for reliability)
+      command: "aws s3 cp s3://{{ s3_bucket }}/{{ s3_world_key }} /tmp/world.zip"
+      register: s3_pull
+      ignore_errors: true
+      changed_when: false
 
-    - name: Extract world archive into {{ data_dir }}
+    - name: Extract world
       unarchive:
-        src: "/tmp/{{ s3_world_key | basename }}"
+        src: /tmp/world.zip
         dest: "{{ data_dir }}"
         remote_src: yes
-        extra_opts: [--strip-components=1]
-      when: s3_download is succeeded
-      notify: Clean up temporary archive
+      when: s3_pull.rc == 0
+      notify: Clean up archive
 
     # -----------------------------------------------------------------
-    # 5️⃣ Pull the pinned Minecraft image from ECR
+    # 5️⃣ Start Minecraft (Using Shell for Container Management)
     # -----------------------------------------------------------------
-    - name: Pull Minecraft Docker image from ECR
-      community.docker.docker_image:
-        name: "{{ ecr_repository }}:{{ ecr_image_tag }}"
-        source: pull
-        pull: yes
-        force_source: yes
-      register: image_pull
+    # Using shell here also ensures we don't hit the same SDK error
+    # that docker_login was having.
+    - name: Pull and Run Minecraft Container
+      shell: |
+        docker pull {{ ecr_repository }}:{{ ecr_image_tag }}
+        docker stop {{ container_name }} || true
+        docker rm {{ container_name }} || true
+        docker run -d \
+          --name {{ container_name }} \
+          --restart unless-stopped \
+          -p {{ container_port }}:25565 \
+          -e EULA=TRUE \
+          -v {{ data_dir }}:/data \
+          {{ ecr_repository }}:{{ ecr_image_tag }}
+      changed_when: true
 
-    # -----------------------------------------------------------------
-    # 6️⃣ Run the Minecraft container (idempotent)
-    # -----------------------------------------------------------------
-    - name: Ensure Minecraft container is present and running
-      community.docker.docker_container:
-        name: "{{ container_name }}"
-        image: "{{ ecr_repository }}:{{ ecr_image_tag }}"
-        state: started
-        restart_policy: unless-stopped
-        ports:
-          - "{{ container_port }}:{{ container_port }}"
-        env:
-          EULA: "{{ eula }}"
-        volumes:
-          - "{{ data_dir }}:/data"
-        healthcheck:
-          test: ["CMD", "mc-healthcheck"]
-          interval: 30s
-          timeout: 10s
-          retries: 5
-        # If the container already exists but the image was just pulled,
-        # force a recreation so the newest image is used.
-        recreate: "{{ image_pull.changed }}"
-      register: container_result
-
-    # -----------------------------------------------------------------
-    # 7️⃣ (Optional) Deploy via docker‑compose if you prefer that workflow
-    # -----------------------------------------------------------------
-    - name: Deploy with docker‑compose (skip if file does not exist)
-      community.docker.docker_compose:
-        project_src: "{{ docker_compose_path | dirname }}"
-        files:
-          - "{{ docker_compose_path | basename }}"
-        state: present
-      when: docker_compose_path is defined and docker_compose_path | length > 0
-      tags: compose
-
-    # -----------------------------------------------------------------
-    # 8️⃣ Verify the container is healthy (smoke test)
-    # -----------------------------------------------------------------
-    - name: Wait for Minecraft container health check to pass
-      community.docker.docker_container_info:
-        name: "{{ container_name }}"
-      register: container_info
-      retries: 12
+    - name: Wait for server "Done" message in logs
+      shell: "docker logs {{ container_name }} 2>&1 | grep -q 'Done'"
+      register: mc_ready
+      retries: 20
       delay: 10
-      until: container_info.container.State.Health.Status == "healthy"
-      ignore_errors: true # If the image does not define a healthcheck, we just continue
+      until: mc_ready.rc == 0
+      changed_when: false
 
-    - name: Print a friendly message when the server is ready
-      debug:
-        msg: |
-          🎮 Minecraft server is up!
-          • Public IP: {{ hostvars[inventory_hostname].ansible_host }}
-          • Port: {{ container_port }}
-          • MOTD (set in your Docker image) should show your name/ID.
-      when: container_info is defined and container_info.container.State.Health.Status == "healthy"
-
-  # -----------------------------------------------------------------
-  # HANDLERS (run only when notified)
-  # -----------------------------------------------------------------
   handlers:
-    - name: Clean up temporary archive
+    - name: Clean up archive
       file:
-        path: "/tmp/{{ s3_world_key | basename }}"
+        path: /tmp/world.zip
         state: absent
