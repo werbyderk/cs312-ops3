@@ -29,7 +29,7 @@ jobs:
       - name: Build, Tag, and Push to ECR
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          UPSTREAM: itzg/minecraft-server:java21-alpine
+          UPSTREAM: itzg/minecraft-server:java25-alpine
         run: |
           # 1. Pull the official image
           docker pull $UPSTREAM
