@@ -120,7 +120,7 @@ data "aws_ami" "ubuntu" {
    ----------------------------------------------------------------- */
 resource "aws_instance" "ops-3-instance" {
   ami                         = data.aws_ami.ubuntu.id
-  instance_type               = "t3.micro"
+  instance_type               = "t3.small"
   subnet_id                   = module.vpc.public_subnets[0]
   associate_public_ip_address = true
   key_name                    = data.aws_key_pair.ops3_key.key_name
