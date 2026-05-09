@@ -1,0 +1,21 @@
+# ansible/mc_backup.yml
+- name: Manually trigger a Minecraft world backup
+  hosts: all
+  become: true
+  vars_files:
+    - vars/main.yml # pulls in data_dir, s3_bucket, etc.
+
+  tasks:
+    - name: Verify the backup script exists
+      stat:
+        path: /usr/local/bin/mc_backup.sh
+      register: backup_script
+
+    - name: Fail if the backup script is missing
+      fail:
+        msg: "Backup script not found – run the main `minecraft.yml` playbook first."
+      when: not backup_script.stat.exists
+
+    - name: Execute the backup script
+      command: /usr/local/bin/mc_backup.sh
+      changed_when: true

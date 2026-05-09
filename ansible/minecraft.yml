@@ -61,29 +61,6 @@
       changed_when: false
 
     # -----------------------------------------------------------------
-    # 4️⃣ Restore World Data (Zip-based)
-    # -----------------------------------------------------------------
-    - name: Ensure data directory exists
-      file:
-        path: "{{ data_dir }}"
-        state: directory
-        mode: "0755"
-
-    - name: Pull world zip from S3
-      command: "aws s3 cp s3://{{ s3_bucket }}/backups/world_backup.zip /tmp/world.zip"
-      register: s3_pull
-      ignore_errors: true
-      changed_when: false
-
-    - name: Extract world if backup exists
-      unarchive:
-        src: /tmp/world.zip
-        dest: "{{ data_dir }}"
-        remote_src: yes
-      when: s3_pull.rc == 0
-      notify: Clean up archive
-
-    # -----------------------------------------------------------------
     # 5️⃣ Start Minecraft
     # -----------------------------------------------------------------
     - name: Pull and Run Minecraft Container
@@ -96,7 +73,7 @@
           --restart unless-stopped \
           -p {{ container_port }}:25565 \
           -e EULA=TRUE \
-          -e MOTD="Derek Werbowy"
+          -e MOTD="{{ mc_server_motd }}" \
           -v {{ data_dir }}:/data \
           {{ ecr_repository }}:{{ ecr_image_tag }}
       changed_when: true
@@ -138,9 +115,3 @@
         name: "Minecraft 30m S3 Backup"
         minute: "*/30"
         job: "/usr/local/bin/mc_backup.sh"
-
-  handlers:
-    - name: Clean up archive
-      file:
-        path: /tmp/world.zip
-        state: absent

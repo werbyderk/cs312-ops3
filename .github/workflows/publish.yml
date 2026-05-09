@@ -38,7 +38,7 @@ jobs:
           docker tag $UPSTREAM $REGISTRY/$REPOSITORY:${{ github.ref_name }}
           docker tag $UPSTREAM $REGISTRY/$REPOSITORY:latest
 
-          # 3. Push to ECR (This is what was missing!)
+          # 3. Push to ECR
           docker push $REGISTRY/$REPOSITORY:${{ github.ref_name }}
           docker push $REGISTRY/$REPOSITORY:latest
 

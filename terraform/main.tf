@@ -18,21 +18,6 @@ provider "aws" {
 }
 
 /* -----------------------------------------------------------------
-   INPUT VARIABLES
-   ----------------------------------------------------------------- */
-variable "ssh_user" {
-  description = "OS user that Ansible will SSH as."
-  type        = string
-  default     = "ubuntu"
-}
-
-variable "ssh_private_key_path" {
-  description = "Path to the private key."
-  type        = string
-  default     = "~/.ssh/cs312-key.pem"
-}
-
-/* -----------------------------------------------------------------
    VPC MODULE
    ----------------------------------------------------------------- */
 module "vpc" {
@@ -86,7 +71,7 @@ resource "aws_security_group" "allow_web" {
    Key‑pair & AMI
    ----------------------------------------------------------------- */
 data "aws_key_pair" "ops3_key" {
-  key_name = "cs312-key"
+  key_name = var.key_pair
 }
 
 data "aws_ami" "ubuntu" {
@@ -192,9 +177,7 @@ resource "aws_s3_bucket_policy" "world_backups" {
   policy = data.aws_iam_policy_document.world_backup_policy.json
 }
 
-/* -----------------------------------------------------------------
-   1️⃣ Write an Ansible inventory file
-   ----------------------------------------------------------------- */
+
 resource "local_file" "ansible_inventory" {
   filename = "${path.module}/inventory.ini"
 
@@ -206,41 +189,49 @@ resource "local_file" "ansible_inventory" {
    ansible_ssh_private_key_file=${var.ssh_private_key_path}
    ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
    s3_bucket=${aws_s3_bucket.world_backups.id}
+   mc_server_motd=${var.mc_server_motd}
    EOT
 
   depends_on = [aws_instance.ops-3-instance, aws_s3_bucket.world_backups]
 }
 
-/* -----------------------------------------------------------------
-   2️⃣ Null resource that runs the Ansible playbook
-   ----------------------------------------------------------------- */
-resource "null_resource" "run_ansible" {
+resource "null_resource" "copy_inventory_to_ansible_dir" {
+  triggers = {
+    # This ensures the copy only happens when the content actually changes
+    inventory_md5 = filemd5(local_file.ansible_inventory.filename)
+  }
+
   provisioner "local-exec" {
-    command = <<-EOC
-      # Wait for SSH (max 180s)
-      for i in $(seq 1 30); do
-        nc -z -w5 ${aws_instance.ops-3-instance.public_ip} 22 && break
-        echo "Waiting for SSH... ($i/30)"
-        sleep 6
-      done
-
-      ansible-playbook -i ${local_file.ansible_inventory.filename} ${path.module}/../ansible/minecraft.yml
-    EOC
-
-    environment = {
-      ANSIBLE_HOST_KEY_CHECKING = "False"
-    }
+    command     = "cp ${local_file.ansible_inventory.filename} ${path.module}/../ansible/inventory.ini"
     interpreter = ["sh", "-c"]
   }
 
+  depends_on = [local_file.ansible_inventory]
+}
+
+resource "null_resource" "run_ansible" {
+  count = var.run_ansible_playbook ? 1 : 0
+
   triggers = {
-    instance_id = aws_instance.ops-3-instance.id
-    public_ip   = aws_instance.ops-3-instance.public_ip
-    # Forces a rerun whenever anything in the playbook logic needs refreshing
     always_run = timestamp()
   }
 
-  depends_on = [local_file.ansible_inventory]
+  provisioner "local-exec" {
+    command = <<-EOC
+         # Wait for SSH (max 180s)
+         for i in $(seq 1 30); do
+           nc -z -w5 ${aws_instance.ops-3-instance.public_ip} 22 && break
+           echo "Waiting for SSH... ($i/30)"
+           sleep 6
+         done
+
+         # Note: We now point to the copied inventory in the ansible dir
+         ansible-playbook -i ${path.module}/../ansible/inventory.ini ${path.module}/../ansible/minecraft.yml
+       EOC
+  }
+
+  # CRITICAL: This ensures the file is copied BEFORE ansible runs
+  depends_on = [null_resource.copy_inventory_to_ansible_dir]
 }
 
 output "ansible_inventory_path" {

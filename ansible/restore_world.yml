@@ -1,0 +1,81 @@
+- name: Restore Minecraft world from S3 backup
+  hosts: all
+  become: true
+  vars_files:
+    - vars/main.yml
+
+  tasks:
+    # -------------------------------------------------------------
+    # 1️⃣ Stop the container to safely restore files
+    # -------------------------------------------------------------
+    - name: Stop Minecraft container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: stopped
+      ignore_errors: true
+
+    # -------------------------------------------------------------
+    # 2️⃣ Restore Logic (Pull & Unzip)
+    # -------------------------------------------------------------
+    - name: Ensure the data directory exists
+      file:
+        path: "{{ data_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Pull world zip from S3
+      command: "aws s3 cp s3://{{ s3_bucket }}/backups/world_backup.zip /tmp/world.zip"
+      register: s3_pull
+      ignore_errors: true
+      changed_when: false
+
+    - name: Extract world if backup exists
+      unarchive:
+        src: /tmp/world.zip
+        dest: "{{ data_dir }}"
+        remote_src: yes
+      when: s3_pull.rc == 0
+      notify: Clean up temporary archive
+
+    - name: Set correct ownership
+      file:
+        path: "{{ data_dir }}"
+        state: directory
+        recurse: true
+        owner: "ubuntu"
+        group: "ubuntu"
+        mode: "0755"
+      when: s3_pull.rc == 0
+
+    # -------------------------------------------------------------
+    # 3️⃣ Single "Source of Truth" Start Task
+    # -------------------------------------------------------------
+    - name: Start Minecraft container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ ecr_repository }}:{{ ecr_image_tag }}"
+        state: started
+        # FIXES THE WARNING:
+        recreate: true
+        # ENSURES FRESH IMAGE:
+        pull: true
+        restart_policy: unless-stopped
+        ports:
+          - "25565:25565"
+        env:
+          EULA: "TRUE" # FIXED: Must be "TRUE" string, not the image tag
+          MOTD: "{{ minecraft_motd | default('A Minecraft Server') }}"
+        volumes:
+          - "{{ data_dir }}:/data"
+    - name: Wait for server "Done" message
+      shell: "docker logs {{ container_name }} 2>&1 | grep -q 'Done'"
+      register: mc_ready
+      retries: 30 # Total wait time: 5 minutes (30 * 10s)
+      delay: 10 # Check every 10 seconds
+      until: mc_ready.rc == 0
+      changed_when: false
+  handlers:
+    - name: Clean up temporary archive
+      file:
+        path: /tmp/world.zip
+        state: absent
