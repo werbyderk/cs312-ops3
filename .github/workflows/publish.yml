@@ -7,13 +7,23 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # Remove the ECR_REGISTRY env from here!
     env:
       REPOSITORY: minecraft-server
+      # -----------------------------------------------------------------
+      # Cache key – includes the upstream image tag so a change forces a new cache
+      # -----------------------------------------------------------------
+      CACHE_KEY: "docker-${{ runner.os }}-${{ github.ref_name }}"
+
     steps:
+      # -----------------------------------------------------------------
+      # 0️⃣ Checkout source
+      # -----------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # -----------------------------------------------------------------
+      # 1️⃣ Configure AWS credentials
+      # -----------------------------------------------------------------
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -22,31 +32,67 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # -----------------------------------------------------------------
+      # 2️⃣ Login to Amazon ECR
+      # -----------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # -----------------------------------------------------------------
+      # 3️⃣ **Cache Docker layers** (pull‑once, reuse‑many)
+      # -----------------------------------------------------------------
+      - name: Restore Docker layer cache
+        uses: actions/cache@v3
+        with:
+          # The directory where Docker stores its layer cache on the runner
+          path: /tmp/.docker-cache
+          # The key changes when the tag (or OS) changes → forces a fresh pull
+          key: ${{ env.CACHE_KEY }}
+
+      - name: Set Docker cache directory
+        run: |
+          # Tell Docker to use the shared cache directory
+          mkdir -p /tmp/.docker-cache
+          echo '{"cache-from": ["type=local,src=/tmp/.docker-cache"]}' > /tmp/docker-build-config.json
+        shell: bash
+
+      # -----------------------------------------------------------------
+      # 4️⃣ Pull, tag, and push the image (now using the cache)
+      # -----------------------------------------------------------------
       - name: Build, Tag, and Push to ECR
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           UPSTREAM: itzg/minecraft-server:java25-alpine
         run: |
-          # 1. Pull the official image
+          # 1️⃣ Pull the upstream image (Docker will reuse cached layers if present)
           docker pull $UPSTREAM
 
-          # 2. Tag it for your private ECR
+          # 2️⃣ Tag it for your private ECR
           docker tag $UPSTREAM $REGISTRY/$REPOSITORY:${{ github.ref_name }}
           docker tag $UPSTREAM $REGISTRY/$REPOSITORY:latest
 
-          # 3. Push to ECR
+          # 3️⃣ Push both tags to ECR
           docker push $REGISTRY/$REPOSITORY:${{ github.ref_name }}
           docker push $REGISTRY/$REPOSITORY:latest
 
+      # -----------------------------------------------------------------
+      # 5️⃣ Save the Docker layer cache for the next run
+      # -----------------------------------------------------------------
+      - name: Save Docker layer cache
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.docker-cache
+          # Re‑use the same key so the next workflow can restore it
+          key: ${{ env.CACHE_KEY }}
+
+      # -----------------------------------------------------------------
+      # 6️⃣ Smoke Test (unchanged)
+      # -----------------------------------------------------------------
       - name: Smoke Test
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          # Run the image WE JUST PUSHED to ensure it's valid
           docker run -d --name test-server -m 2g -e EULA=TRUE $REGISTRY/$REPOSITORY:latest
 
           echo "Waiting for Minecraft to say 'Done'..."

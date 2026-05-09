@@ -198,8 +198,7 @@ resource "local_file" "ansible_inventory" {
 
 resource "null_resource" "copy_inventory_to_ansible_dir" {
   triggers = {
-    # This ensures the copy only happens when the content actually changes
-    inventory_md5 = filemd5(local_file.ansible_inventory.filename)
+    inventory_path = local_file.ansible_inventory.filename
   }
 
   provisioner "local-exec" {
