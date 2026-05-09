@@ -1,7 +1,7 @@
 # ansible/vars/main.yml
 aws_region: "us-east-1"
 # Ensure this matches the GitHub Action 'REPOSITORY' env var!
-ecr_repository: "133610650551.dkr.ecr.us-east-1.amazonaws.com/minecraft-server"
+#ecr_repository: "133610650551.dkr.ecr.us-east-1.amazonaws.com/minecraft-server"
 ecr_image_tag: "latest"
 container_name: "minecraft-server"
 data_dir: "/data"

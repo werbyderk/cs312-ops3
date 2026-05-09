@@ -106,10 +106,6 @@
           rm /tmp/world_backup.zip
           echo "Zipped backup completed at $(date)" >> /var/log/mc_backup.log
 
-    - name: Run initial backup after startup
-      command: /usr/local/bin/mc_backup.sh
-      changed_when: true
-
     - name: Schedule recurring 30-minute backup
       ansible.builtin.cron:
         name: "Minecraft 30m S3 Backup"

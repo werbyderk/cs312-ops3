@@ -190,9 +190,10 @@ resource "local_file" "ansible_inventory" {
    ansible_ssh_common_args='-o StrictHostKeyChecking=accept-new'
    s3_bucket=${aws_s3_bucket.world_backups.id}
    mc_server_motd=${var.mc_server_motd}
+   ecr_repository=${aws_ecr_repository.minecraft.repository_url}
    EOT
 
-  depends_on = [aws_instance.ops-3-instance, aws_s3_bucket.world_backups]
+  depends_on = [aws_instance.ops-3-instance, aws_s3_bucket.world_backups, aws_ecr_repository.minecraft]
 }
 
 resource "null_resource" "copy_inventory_to_ansible_dir" {
