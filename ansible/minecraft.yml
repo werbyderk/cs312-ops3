@@ -11,7 +11,7 @@
     # -----------------------------------------------------------------
     - name: Install system dependencies
       apt:
-        name: [python3-venv, docker.io, unzip, curl]
+        name: [python3-venv, docker.io, unzip, zip, curl]
         state: present
         update_cache: yes
 
@@ -28,7 +28,7 @@
         append: yes
 
     # -----------------------------------------------------------------
-    # 2️⃣ Install AWS CLI v2 (System-wide)
+    # 2️⃣ Install AWS CLI v2
     # -----------------------------------------------------------------
     - name: Check for AWS CLI
       command: aws --version
@@ -52,18 +52,16 @@
           command: /tmp/aws/install --update
 
     # -----------------------------------------------------------------
-    # 3️⃣ Authenticate to ECR (Bypassing the buggy docker_login module)
+    # 3️⃣ Authenticate to ECR
     # -----------------------------------------------------------------
     - name: Log Docker into ECR via Shell
       shell: |
         aws ecr get-login-password --region {{ aws_region }} | \
         docker login --username AWS --password-stdin {{ ecr_repository.split('/') | first }}
       changed_when: false
-      # We use shell here because the community.docker.docker_login module
-      # is triggering the "http+docker" scheme error on Ubuntu 24.04.
 
     # -----------------------------------------------------------------
-    # 4️⃣ Restore World Data
+    # 4️⃣ Restore World Data (Zip-based)
     # -----------------------------------------------------------------
     - name: Ensure data directory exists
       file:
@@ -71,13 +69,13 @@
         state: directory
         mode: "0755"
 
-    - name: Pull world from S3 (bypassing python-s3 modules for reliability)
-      command: "aws s3 cp s3://{{ s3_bucket }}/{{ s3_world_key }} /tmp/world.zip"
+    - name: Pull world zip from S3
+      command: "aws s3 cp s3://{{ s3_bucket }}/backups/world_backup.zip /tmp/world.zip"
       register: s3_pull
       ignore_errors: true
       changed_when: false
 
-    - name: Extract world
+    - name: Extract world if backup exists
       unarchive:
         src: /tmp/world.zip
         dest: "{{ data_dir }}"
@@ -86,10 +84,8 @@
       notify: Clean up archive
 
     # -----------------------------------------------------------------
-    # 5️⃣ Start Minecraft (Using Shell for Container Management)
+    # 5️⃣ Start Minecraft
     # -----------------------------------------------------------------
-    # Using shell here also ensures we don't hit the same SDK error
-    # that docker_login was having.
     - name: Pull and Run Minecraft Container
       shell: |
         docker pull {{ ecr_repository }}:{{ ecr_image_tag }}
@@ -100,6 +96,7 @@
           --restart unless-stopped \
           -p {{ container_port }}:25565 \
           -e EULA=TRUE \
+          -e MOTD="Derek Werbowy"
           -v {{ data_dir }}:/data \
           {{ ecr_repository }}:{{ ecr_image_tag }}
       changed_when: true
@@ -107,10 +104,40 @@
     - name: Wait for server "Done" message in logs
       shell: "docker logs {{ container_name }} 2>&1 | grep -q 'Done'"
       register: mc_ready
-      retries: 20
+      retries: 30
       delay: 10
       until: mc_ready.rc == 0
       changed_when: false
+
+    # -----------------------------------------------------------------
+    # 6️⃣ Backup Logic (Zip-based)
+    # -----------------------------------------------------------------
+    - name: Create backup script
+      copy:
+        dest: /usr/local/bin/mc_backup.sh
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # 1. Create a zip of the data directory
+          # We zip the contents of data_dir so world/ resides at the root of the zip
+          cd {{ data_dir }} && zip -r /tmp/world_backup.zip .
+
+          # 2. Upload the zip to S3
+          aws s3 cp /tmp/world_backup.zip s3://{{ s3_bucket }}/backups/world_backup.zip
+
+          # 3. Cleanup
+          rm /tmp/world_backup.zip
+          echo "Zipped backup completed at $(date)" >> /var/log/mc_backup.log
+
+    - name: Run initial backup after startup
+      command: /usr/local/bin/mc_backup.sh
+      changed_when: true
+
+    - name: Schedule recurring 30-minute backup
+      ansible.builtin.cron:
+        name: "Minecraft 30m S3 Backup"
+        minute: "*/30"
+        job: "/usr/local/bin/mc_backup.sh"
 
   handlers:
     - name: Clean up archive

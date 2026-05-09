@@ -5,7 +5,6 @@ ecr_repository: "133610650551.dkr.ecr.us-east-1.amazonaws.com/minecraft-server"
 ecr_image_tag: "latest"
 container_name: "minecraft-server"
 data_dir: "/data"
-s3_bucket: "world_backups"
 s3_world_key: "world.zip"
 container_port: 25565
 eula: "TRUE"
