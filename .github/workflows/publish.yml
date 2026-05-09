@@ -9,21 +9,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       REPOSITORY: minecraft-server
-      # -----------------------------------------------------------------
-      # Cache key – includes the upstream image tag so a change forces a new cache
-      # -----------------------------------------------------------------
-      CACHE_KEY: "docker-${{ runner.os }}-${{ github.ref_name }}"
 
     steps:
-      # -----------------------------------------------------------------
-      # 0️⃣ Checkout source
-      # -----------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
       # -----------------------------------------------------------------
-      # 1️⃣ Configure AWS credentials
+      # 1️⃣ Set up Docker Buildx (Necessary for GHA Caching)
       # -----------------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -32,68 +28,34 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # -----------------------------------------------------------------
-      # 2️⃣ Login to Amazon ECR
-      # -----------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       # -----------------------------------------------------------------
-      # 3️⃣ **Cache Docker layers** (pull‑once, reuse‑many)
+      # 2️⃣ Build and Push with Native GHA Caching
       # -----------------------------------------------------------------
-      - name: Restore Docker layer cache
-        uses: actions/cache@v3
+      - name: Build and Push
+        uses: docker/build-push-action@v5
         with:
-          # The directory where Docker stores its layer cache on the runner
-          path: /tmp/.docker-cache
-          # The key changes when the tag (or OS) changes → forces a fresh pull
-          key: ${{ env.CACHE_KEY }}
-
-      - name: Set Docker cache directory
-        run: |
-          # Tell Docker to use the shared cache directory
-          mkdir -p /tmp/.docker-cache
-          echo '{"cache-from": ["type=local,src=/tmp/.docker-cache"]}' > /tmp/docker-build-config.json
-        shell: bash
-
-      # -----------------------------------------------------------------
-      # 4️⃣ Pull, tag, and push the image (now using the cache)
-      # -----------------------------------------------------------------
-      - name: Build, Tag, and Push to ECR
-        env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          UPSTREAM: itzg/minecraft-server:java25-alpine
-        run: |
-          # 1️⃣ Pull the upstream image (Docker will reuse cached layers if present)
-          docker pull $UPSTREAM
-
-          # 2️⃣ Tag it for your private ECR
-          docker tag $UPSTREAM $REGISTRY/$REPOSITORY:${{ github.ref_name }}
-          docker tag $UPSTREAM $REGISTRY/$REPOSITORY:latest
-
-          # 3️⃣ Push both tags to ECR
-          docker push $REGISTRY/$REPOSITORY:${{ github.ref_name }}
-          docker push $REGISTRY/$REPOSITORY:latest
+          context: .
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY }}:${{ github.ref_name }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY }}:latest
+          # This is the magic part that replaces your /tmp/.docker-cache logic:
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # If you are just "re-tagging" the itzg image, use build-args:
+          build-args: |
+            BASE_IMAGE=itzg/minecraft-server:java25-alpine
 
       # -----------------------------------------------------------------
-      # 5️⃣ Save the Docker layer cache for the next run
-      # -----------------------------------------------------------------
-      - name: Save Docker layer cache
-        uses: actions/cache@v3
-        with:
-          path: /tmp/.docker-cache
-          # Re‑use the same key so the next workflow can restore it
-          key: ${{ env.CACHE_KEY }}
-
-      # -----------------------------------------------------------------
-      # 6️⃣ Smoke Test (unchanged)
+      # 3️⃣ Smoke Test
       # -----------------------------------------------------------------
       - name: Smoke Test
-        env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker run -d --name test-server -m 2g -e EULA=TRUE $REGISTRY/$REPOSITORY:latest
+          docker run -d --name test-server -m 2g -e EULA=TRUE ${{ steps.login-ecr.outputs.registry }}/${{ env.REPOSITORY }}:latest
 
           echo "Waiting for Minecraft to say 'Done'..."
           for i in {1..20}; do
@@ -102,10 +64,6 @@ jobs:
               docker stop test-server && docker rm test-server
               exit 0
             fi
-            echo "Attempt $i: Server still starting..."
             sleep 10
           done
-
-          echo "❌ Smoke test failed!"
-          docker logs test-server
           exit 1
