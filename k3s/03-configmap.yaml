@@ -1,0 +1,12 @@
+# /Users/derek/Documents/OSU/Spring '26/CS 312/ops-4/k3s/04-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: minecraft-config
+  namespace: minecraft
+data:
+  server.properties: |
+    motd=Welcome to Derek's Minecraft server
+    max-players=20
+    difficulty=normal
+    # add any other key=value pairs you need

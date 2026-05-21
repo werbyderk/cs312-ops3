@@ -1,5 +1,5 @@
 ---
-- name: Deploy Minecraft server
+- name: Deploy Minecraft server on k3s using Helm
   hosts: all
   become: true
   vars_files:
@@ -7,28 +7,24 @@
 
   tasks:
     # -----------------------------------------------------------------
-    # 1️⃣ Standard Prerequisites
+    # 1️⃣  System prerequisites (AWS CLI, zip, etc.) – unchanged
     # -----------------------------------------------------------------
     - name: Install system dependencies
       apt:
-        name: [python3-venv, docker.io, unzip, zip, curl]
+        name: [
+            python3-venv,
+            unzip,
+            zip,
+            curl,
+            ca-certificates,
+            gnupg,
+            docker.io,
+          ] # Docker removed – not needed for k3s
         state: present
         update_cache: yes
 
-    - name: Ensure Docker is started
-      systemd:
-        name: docker
-        state: started
-        enabled: true
-
-    - name: Add ubuntu to docker group
-      user:
-        name: ubuntu
-        groups: docker
-        append: yes
-
     # -----------------------------------------------------------------
-    # 2️⃣ Install AWS CLI v2
+    # 2️⃣  Install AWS CLI v2  (unchanged)
     # -----------------------------------------------------------------
     - name: Check for AWS CLI
       command: aws --version
@@ -52,42 +48,230 @@
           command: /tmp/aws/install --update
 
     # -----------------------------------------------------------------
-    # 3️⃣ Authenticate to ECR
+    # 3️⃣  Install k3s (single‑node, no extra args)
     # -----------------------------------------------------------------
-    - name: Log Docker into ECR via Shell
+    - name: Install k3s binary and start the service
       shell: |
-        aws ecr get-login-password --region {{ aws_region }} | \
-        docker login --username AWS --password-stdin {{ ecr_repository.split('/') | first }}
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik" sh -
+      args:
+        creates: /usr/local/bin/k3s # idempotent
+      register: k3s_install
+      changed_when: k3s_install.rc == 0
+
+    - name: Ensure k3s service is enabled and running
+      systemd:
+        name: k3s
+        enabled: true
+        state: started
+
+    # -----------------------------------------------------------------
+    # 4️⃣  Make kubeconfig available to the ubuntu user
+    # -----------------------------------------------------------------
+    - name: Create .kube directory for ubuntu
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Copy k3s kubeconfig for ubuntu
+      become: true # ensure we have permission to read the source file
+      copy:
+        src: /etc/rancher/k3s/k3s.yaml # **source is on the remote host**
+        dest: /home/ubuntu/.kube/config
+        owner: ubuntu
+        group: ubuntu
+        mode: "0600"
+        remote_src: true # <‑‑ tell Ansible the file is remote
+
+    # -----------------------------------------------------------------
+    # 5️⃣  Create (or update) the ECR image‑pull secret automatically
+    # -----------------------------------------------------------------
+    # 5.1  Ensure any stale temporary file is removed
+    - name: Ensure old temporary Docker config JSON is absent
+      file:
+        path: /tmp/ecr-dockerconfig.json
+        state: absent
+
+    # 5.2  Generate a fresh Docker config JSON for ECR (pure‑AWS method)
+    - name: Generate Docker config JSON for ECR (pure‑AWS method)
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+      shell: |
+        set -e
+
+        # ---- 1️⃣  Pull the ECR auth token ---------------------------------
+        ECR_PASSWORD=$(aws ecr get-login-password --region {{ aws_region }})
+
+        # ---- 2️⃣  Build the Docker config JSON ----------------------------
+        REGISTRY="{{ ecr_repository.split('/') | first }}"
+        AUTH=$(python3 -c "import base64,sys; \
+            print(base64.b64encode(('AWS:' + sys.argv[1]).encode()).decode())" "$ECR_PASSWORD")
+
+        # Generate JSON using Python to avoid heredoc indentation issues in YAML
+        python3 -c "import json, sys; print(json.dumps({'auths': {sys.argv[1]: {'auth': sys.argv[2]}}}))" \
+          "$REGISTRY" "$AUTH" > /tmp/ecr-dockerconfig.json
+      args:
+        executable: /bin/bash
+      register: ecr_cfg
+      changed_when: ecr_cfg.rc == 0
+
+    # 5.3  **Optional** – show the generated JSON (redacted for safety)
+    - name: Show generated Docker config JSON (redacted)
+      debug:
+        var: ecr_cfg.stdout_lines
+      no_log: false # hides the auth token in the playbook output
+      # Remove `no_log: true` only if you really need to see the raw JSON.
+
+    # 5.4  Verify the file exists and is not empty
+    - name: Verify Docker config JSON was created
+      stat:
+        path: /tmp/ecr-dockerconfig.json
+      register: ecr_json_stat
+
+    - name: Fail if Docker config JSON is missing or empty
+      fail:
+        msg: |
+          The file /tmp/ecr-dockerconfig.json was not created or is empty.
+          Check that:
+          • The IAM instance profile has permission `ecr:GetAuthorizationToken`.
+          • `aws ecr get-login-password` succeeded (see previous task output).
+      when: not ecr_json_stat.stat.exists or ecr_json_stat.stat.size == 0
+
+    # 5.5 Ensure the Kubernetes namespace exists
+    - name: Ensure the Kubernetes namespace exists
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl create namespace {{ k8s_namespace | default('minecraft') }} --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      changed_when: false
+
+    # 5.6  Delete any pre‑existing (possibly empty) secret
+    - name: Delete old ecr‑cred secret if it exists
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl delete secret ecr-cred -n {{ k8s_namespace | default('minecraft') }} --ignore-not-found
+      args:
+        executable: /bin/bash
+      changed_when: false # we don’t care whether it existed or not
+
+    # 5.7  Create the secret with the fresh JSON file
+    - name: Create the Kubernetes imagePullSecret
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl create secret generic {{ ecr_secret_name | default('ecr-cred') }} \
+          --type=kubernetes.io/dockerconfigjson \
+          --from-file=.dockerconfigjson=/tmp/ecr-dockerconfig.json \
+          -n {{ k8s_namespace | default('minecraft') }}
+      args:
+        executable: /bin/bash
+      register: secret_create
+      changed_when: "'created' in secret_create.stdout"
+
+    # 5.8  Clean up the temporary JSON file
+    - name: Remove temporary Docker config JSON
+      file:
+        path: /tmp/ecr-dockerconfig.json
+        state: absent
+
+    # -----------------------------------------------------------------
+    # 5️⃣  Install Helm (official script)
+    # -----------------------------------------------------------------
+    # - name: Check for helm
+    #   command: helm version --short
+    #   register: helm_check
+    #   ignore_errors: true
+    #   changed_when: false
+
+    # - name: Install Helm if missing
+    #   when: helm_check.rc != 0
+    #   block:
+    #     - name: Download Helm install script
+    #       get_url:
+    #         url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    #         dest: /tmp/get_helm.sh
+    #         mode: "0755"
+    #     - name: Run Helm installer
+    #       shell: /tmp/get_helm.sh
+    #       args:
+    #         creates: /usr/local/bin/helm
+
+    # -----------------------------------------------------------------
+    # 6️⃣  Deploy (or upgrade) the Minecraft Helm chart
+    # -----------------------------------------------------------------
+    # - name: Ensure Helm chart directory exists on the remote host
+    #   # We copy the whole chart from the control machine to the target.
+    #   copy:
+    #     src: "{{ playbook_dir }}/../helm/minecraft/"
+    #     dest: /home/ubuntu/minecraft-chart/
+    #     owner: ubuntu
+    #     group: ubuntu
+    #     mode: "0755"
+
+    # - name: Render and apply Helm chart (upgrade if already installed)
+    #   become_user: ubuntu
+    #   environment:
+    #     KUBECONFIG: /home/ubuntu/.kube/config
+    #   shell: |
+    #     helm upgrade --install minecraft \
+    #       /home/ubuntu/minecraft-chart \
+    #       --namespace minecraft \
+    #       --create-namespace \
+    #       --set image.repository={{ ecr_repository }} \
+    #       --set image.tag={{ ecr_image_tag }} \
+    #       --set service.port={{ container_port }} \
+    #       --set minecraft.motd="{{ mc_server_motd }}" \
+    #       --set backup.s3Bucket={{ s3_bucket }}
+    #   args:
+    #     executable: /bin/bash
+    #   register: helm_deploy
+    #   changed_when: "'installed' in helm_deploy.stdout or 'upgraded' in helm_deploy.stdout"
+    # -----------------------------------------------------------------
+    # 6️⃣  Deploy the raw K3s manifests (no Helm)
+    # -----------------------------------------------------------------
+    - name: Copy raw K3s manifests to the EC2 host
+      copy:
+        src: "{{ playbook_dir }}/../k3s/"
+        dest: /home/ubuntu/k3s-manifests/
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Apply all K3s manifests
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl apply -f /home/ubuntu/k3s-manifests/
+      args:
+        executable: /bin/bash
+      register: k3s_apply
+      changed_when: "'created' in k3s_apply.stdout or 'configured' in k3s_apply.stdout"
+    # -----------------------------------------------------------------
+    # 7️⃣  Wait for the Minecraft pod to become Ready (optional sanity check)
+    # -----------------------------------------------------------------
+    - name: Wait for Minecraft pod Ready condition
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl -n minecraft wait --for=condition=Ready pod -l app=minecraft --timeout=300s
+      register: wait_ready
+      failed_when: wait_ready.rc != 0
       changed_when: false
 
     # -----------------------------------------------------------------
-    # 5️⃣ Start Minecraft
-    # -----------------------------------------------------------------
-    - name: Pull and Run Minecraft Container
-      shell: |
-        docker pull {{ ecr_repository }}:{{ ecr_image_tag }}
-        docker stop {{ container_name }} || true
-        docker rm {{ container_name }} || true
-        docker run -d \
-          --name {{ container_name }} \
-          --restart unless-stopped \
-          -p {{ container_port }}:25565 \
-          -e EULA=TRUE \
-          -e MOTD="{{ mc_server_motd }}" \
-          -v {{ data_dir }}:/data \
-          {{ ecr_repository }}:{{ ecr_image_tag }}
-      changed_when: true
-
-    - name: Wait for server "Done" message in logs
-      shell: "docker logs {{ container_name }} 2>&1 | grep -q 'Done'"
-      register: mc_ready
-      retries: 30
-      delay: 10
-      until: mc_ready.rc == 0
-      changed_when: false
-
-    # -----------------------------------------------------------------
-    # 6️⃣ Backup Logic (Zip-based)
+    # 8️⃣  Backup Logic (unchanged – runs on the host)
     # -----------------------------------------------------------------
     - name: Create backup script
       copy:
@@ -95,18 +279,28 @@
         mode: "0755"
         content: |
           #!/bin/bash
-          # 1. Create a zip of the data directory
-          # We zip the contents of data_dir so world/ resides at the root of the zip
-          cd {{ data_dir }} && zip -r /tmp/world_backup.zip .
+          # 1. Zip the data directory that is mounted by the PVC
+          #    (the PVC is mounted on the node at /var/lib/rancher/k3s/storage/<uuid>/data)
+          #    We assume the chart mounts the PVC at /data inside the pod,
+          #    and k3s also bind‑mounts that path on the host under /var/lib/rancher/k3s/storage.
+          DATA_MOUNT="/var/lib/rancher/k3s/storage"
+          # Find the directory that contains the world data (first match)
+          WORLD_DIR=$(find "$DATA_MOUNT" -type d -name "world" | head -n1)
+          if [[ -z "$WORLD_DIR" ]]; then
+            echo "World directory not found!" >&2
+            exit 1
+          fi
+          cd "$WORLD_DIR/.." && zip -r /tmp/world_backup.zip "$(basename "$WORLD_DIR")"
 
-          # 2. Upload the zip to S3
-          aws s3 cp /tmp/world_backup.zip s3://{{ s3_bucket }}/backups/world_backup.zip
+          # 2. Upload the zip to S3 (both timestamped and latest)
+          aws s3 cp /tmp/world_backup.zip s3://{{ s3_bucket }}/backups/world_backup_$(date +%Y%m%d%H%M%S).zip
+          aws s3 cp /tmp/world_backup.zip s3://{{ s3_bucket }}/backups/world_backup_latest.zip
 
           # 3. Cleanup
           rm /tmp/world_backup.zip
-          echo "Zipped backup completed at $(date)" >> /var/log/mc_backup.log
+          echo "Backup completed at $(date)" >> /var/log/mc_backup.log
 
-    - name: Schedule recurring 30-minute backup
+    - name: Schedule recurring 30‑minute backup
       ansible.builtin.cron:
         name: "Minecraft 30m S3 Backup"
         minute: "*/30"

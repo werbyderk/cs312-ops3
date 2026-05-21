@@ -1,0 +1,12 @@
+# /Users/derek/Documents/OSU/Spring '26/CS 312/ops-4/k3s/03-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minecraft-data
+  namespace: minecraft
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path # default storage class that ships with K3s
+  resources:
+    requests:
+      storage: 10Gi
