@@ -3,3 +3,4 @@ ssh_user             = "ubuntu"
 run_ansible_playbook = false
 mc_server_motd       = "Derek Werbowy"
 key_pair             = "cs312-key"
+allowed_ssh_cidr     = "73.164.248.48/32"

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: minecraft
+description: A Helm chart for a Minecraft server on k3s
+type: application
+version: 0.1.0
+appVersion: "1.21.1"
