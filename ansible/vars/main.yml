@@ -8,3 +8,5 @@ data_dir: "/data"
 s3_world_key: "world.zip"
 container_port: 25565
 eula: "TRUE"
+monitoring_namespace: "monitoring"
+k8s_namespace: "minecraft"

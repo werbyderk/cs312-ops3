@@ -94,12 +94,17 @@ data "aws_ami" "ubuntu" {
    ----------------------------------------------------------------- */
 resource "aws_instance" "ops-3-instance" {
   ami                         = data.aws_ami.ubuntu.id
-  instance_type               = "t3.small" # Upgraded for Java 25 / 1.21+
+  instance_type               = "t3.medium" # Upgraded for monitoring stack (Ops 5)
   subnet_id                   = module.vpc.public_subnets[0]
   associate_public_ip_address = true
   key_name                    = data.aws_key_pair.ops3_key.key_name
   vpc_security_group_ids      = [aws_security_group.allow_web.id]
   iam_instance_profile        = "LabInstanceProfile"
+
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
+  }
 
   tags = {
     Name = "web-instance"

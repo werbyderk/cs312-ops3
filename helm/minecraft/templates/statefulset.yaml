@@ -24,14 +24,23 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.service.port }}
+            - containerPort: {{ .Values.minecraft.rcon.port }}
+              name: rcon
           env:
             - name: EULA
               value: {{ .Values.minecraft.eula | quote }}
             - name: MOTD
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ include "minecraft.fullname" . }}-config
-                  key: server.properties
+              value: {{ .Values.minecraft.motd | quote }}
+            - name: MAX_PLAYERS
+              value: {{ .Values.minecraft.maxPlayers | quote }}
+            - name: DIFFICULTY
+              value: {{ .Values.minecraft.difficulty | quote }}
+            - name: ENABLE_RCON
+              value: "TRUE"
+            - name: RCON_PORT
+              value: {{ .Values.minecraft.rcon.port | quote }}
+            - name: RCON_PASSWORD
+              value: {{ .Values.minecraft.rcon.password | quote }}
           volumeMounts:
             - name: world-data
               mountPath: /data
@@ -52,6 +61,19 @@ spec:
               port: {{ .Values.service.port }}
             initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
             periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+        {{- if .Values.exporter.enabled }}
+        - name: exporter
+          image: "{{ .Values.exporter.image.repository }}:{{ .Values.exporter.image.tag }}"
+          args:
+            - export-for-prometheus
+            - -servers
+            - localhost:{{ .Values.service.port }}
+          ports:
+            - containerPort: 8080
+              name: metrics
+          resources:
+            {{- toYaml .Values.exporter.resources | nindent 12 }}
+        {{- end }}
       volumes:
         - name: world-data
           persistentVolumeClaim:

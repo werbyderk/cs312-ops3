@@ -83,6 +83,130 @@ To prevent runaway costs in AWS Academy, follow these steps:
 3.  **Verify ECR Deletion:** Ensure the repository is removed.
 4.  **Confirm in Console:** Log into the AWS Console and verify no EC2 instances or EBS volumes remain in `us-east-1`.
 
+## 4. Alert Runbooks
+
+Each alert defined in `helm/monitoring/values.yaml` links to the corresponding runbook below.
+
+---
+
+### MinecraftPodDown
+
+**Symptom:** Players cannot connect to the server. The Minecraft pod is not in a Ready state.
+
+**Severity:** Critical
+
+**First Response:**
+1. Check the pod status:
+   ```bash
+   kubectl get pods -n minecraft -l app=minecraft
+   ```
+2. Describe the pod to find the root cause:
+   ```bash
+   kubectl describe pod -n minecraft -l app=minecraft
+   ```
+   Look for `Events:` at the bottom — common causes: OOMKill, image pull failure, probe failure.
+3. Check the container logs:
+   ```bash
+   kubectl logs -n minecraft -l app=minecraft --tail=50
+   ```
+4. If the image is missing or broken, roll back:
+   ```bash
+   helm rollback minecraft -n minecraft
+   ```
+
+**Resolution:** Once the underlying issue is fixed, the pod will restart automatically via the StatefulSet controller. Run `kubectl wait --for=condition=Ready pod -n minecraft -l app=minecraft --timeout=300s` to confirm.
+
+---
+
+### MinecraftHighMemoryUsage
+
+**Symptom:** Server lag, risk of OOM kill. Container memory exceeds 80% of its limit.
+
+**Severity:** Warning
+
+**First Response:**
+1. Check current resource usage:
+   ```bash
+   kubectl top pod -n minecraft -l app=minecraft
+   ```
+2. Check if the container has been recently OOM-killed:
+   ```bash
+   kubectl describe pod -n minecraft -l app=minecraft | grep -A5 "Status:"
+   ```
+   `OOMKilled` in the last state indicates the limit is too low.
+3. Consider increasing memory limits in `helm/minecraft/values.yaml`:
+   ```yaml
+   resources:
+     limits:
+       memory: 2Gi
+   ```
+4. Re-deploy after updating:
+   ```bash
+   ansible-playbook -i terraform/inventory.ini ansible/minecraft.yml
+   ```
+
+**Escalation:** If memory grows unbounded over time, investigate a plugin or world issue. Restore from S3 backup if corruption is suspected.
+
+---
+
+### MinecraftPodCrashLooping
+
+**Symptom:** Server repeatedly crashes. Pod has restarted more than 2 times in 10 minutes.
+
+**Severity:** Critical
+
+**First Response:**
+1. Check restart count:
+   ```bash
+   kubectl get pods -n minecraft -l app=minecraft
+   ```
+   The `RESTARTS` column shows the count.
+2. View the previous container's logs (before the crash):
+   ```bash
+   kubectl logs -n minecraft -l app=minecraft --previous --tail=50
+   ```
+3. Check events for the pod:
+   ```bash
+   kubectl get events -n minecraft --field-selector involvedObject.name=<pod-name>
+   ```
+4. Roll back to the last known-good version:
+   ```bash
+   helm history minecraft -n minecraft
+   helm rollback minecraft <revision> -n minecraft
+   ```
+
+---
+
+### NodeDiskUsageHigh
+
+**Symptom:** Risk of world save failure, pod eviction. Disk usage exceeds 80%.
+
+**Severity:** Warning
+
+**First Response:**
+1. SSH to the EC2 host and check disk usage:
+   ```bash
+   ssh -i ~/.ssh/cs312-key.pem ubuntu@<host-ip>
+   df -h
+   ```
+2. Identify large directories:
+   ```bash
+   sudo du -sh /var/lib/rancher/k3s/storage/
+   sudo du -sh /var/lib/rancher/k3s/agent/containerd/
+   ```
+3. Prune unused container images:
+   ```bash
+   k3s crictl rmi --prune
+   ```
+4. Check backup logs — old backups may accumulate in `/tmp`:
+   ```bash
+   ls -lah /tmp/world_backup*.zip
+   ```
+
+**Prevention:** The k3s install in the Ansible playbook enables aggressive eviction thresholds to prevent disk-full scenarios. Consider increasing the root volume in `terraform/main.tf` if this alert fires frequently.
+
+---
+
 # Minecraft Network Policy Documentation
 
 ## Overview

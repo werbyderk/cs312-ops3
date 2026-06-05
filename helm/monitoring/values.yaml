@@ -1,0 +1,131 @@
+prometheus:
+  prometheusSpec:
+    serviceMonitorNamespaceSelector: {}
+    retention: 1d
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-path
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+
+grafana:
+  adminPassword: admin # Should be changed or handled via secret, but for lab it's okay
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
+      limits:
+        cpu: 50m
+        memory: 64Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      cpu: 50m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 32Mi
+
+additionalPrometheusRules:
+  - name: minecraft-alerts
+    groups:
+      - name: minecraft
+        rules:
+          - alert: MinecraftPodDown
+            expr: |
+              kube_pod_status_ready{condition="true", pod=~".*minecraft.*"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Minecraft pod is not ready"
+              description: >-
+                The Minecraft pod has been in a non-ready state for over 1 minute.
+                Players cannot connect to the server. Check `kubectl describe pod -n minecraft -l app=minecraft`
+                and `kubectl logs -n minecraft -l app=minecraft` to diagnose.
+              runbook_url: "https://github.com/derekw2809/ops-3/blob/main/RUNBOOK.md#minecraftpoddown"
+
+          - alert: MinecraftHighMemoryUsage
+            expr: |
+              sum(container_memory_usage_bytes{pod=~".*minecraft.*", container="minecraft"})
+              / sum(container_spec_memory_limit_bytes{pod=~".*minecraft.*", container="minecraft"}) * 100 > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Minecraft container memory usage above 80%"
+              description: >-
+                Minecraft container memory usage has exceeded 80% of its limit for 5 minutes.
+                This risks OOM kills and player-visible lag. Run `kubectl top pod -n minecraft` to check current usage.
+                Consider increasing memory limits in helm/minecraft/values.yaml or investigating a memory leak.
+              runbook_url: "https://github.com/derekw2809/ops-3/blob/main/RUNBOOK.md#minecrafthighmemoryusage"
+
+          - alert: MinecraftPodCrashLooping
+            expr: |
+              increase(kube_pod_container_status_restarts_total{pod=~".*minecraft.*", container="minecraft"}[10m]) > 2
+            for: 0m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Minecraft pod is crash-looping"
+              description: >-
+                The Minecraft container has restarted more than 2 times in 10 minutes.
+                Run `kubectl describe pod -n minecraft -l app=minecraft` and
+                `kubectl logs -n minecraft -l app=minecraft --previous` to investigate the crash.
+                Consider a rollback via `helm rollback minecraft -n minecraft`.
+              runbook_url: "https://github.com/derekw2809/ops-3/blob/main/RUNBOOK.md#minecraftpodcrashlooping"
+
+          - alert: NodeDiskUsageHigh
+            expr: |
+              (1 - (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"})) * 100 > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Node disk usage above 80%"
+              description: >-
+                Disk usage on the EC2 node has exceeded 80% for 5 minutes.
+                This risks world save failures and pod eviction.
+                Run `df -h` on the node to check usage. Clean up old images with `k3s crictl rmi --prune`
+                or increase the root volume size in terraform/main.tf.
+              runbook_url: "https://github.com/derekw2809/ops-5/blob/main/RUNBOOK.md#nodediskusagehigh"

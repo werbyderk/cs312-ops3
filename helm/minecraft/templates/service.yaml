@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: {{ include "minecraft.fullname" . }}
   namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "minecraft.selectorLabels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   selector:
@@ -12,3 +14,9 @@ spec:
       protocol: TCP
       port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.port }}
+    {{- if .Values.exporter.enabled }}
+    - name: metrics
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+    {{- end }}

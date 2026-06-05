@@ -40,11 +40,11 @@
           command: /tmp/aws/install --update
 
     # -----------------------------------------------------------------
-    # 3️⃣  Install k3s
+    # 3️⃣  Install k3s and Cleanup
     # -----------------------------------------------------------------
     - name: Install k3s binary and start the service
       shell: |
-        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik" sh -
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --kubelet-arg=eviction-hard=imagefs.available<1%,nodefs.available<1% --kubelet-arg=eviction-minimum-reclaim=imagefs.available=500Mi,nodefs.available=500Mi" sh -
       args:
         creates: /usr/local/bin/k3s
       register: k3s_install
@@ -55,6 +55,12 @@
         name: k3s
         enabled: true
         state: started
+
+    - name: Prune unused container images to save disk space
+      shell: k3s crictl rmi --prune
+      register: prune_result
+      changed_when: "'Deleted:' in prune_result.stdout"
+      ignore_errors: true
 
     # -----------------------------------------------------------------
     # 4️⃣  Make kubeconfig available to the ubuntu user
@@ -172,7 +178,62 @@
             creates: /usr/local/bin/helm
 
     # -----------------------------------------------------------------
-    # 7️⃣  Deploy Minecraft Helm Chart
+    # 7️⃣  Deploy Monitoring Stack (Prometheus & Grafana)
+    # -----------------------------------------------------------------
+    - name: Ensure the monitoring namespace exists
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl create namespace {{ monitoring_namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+
+    - name: Add Prometheus community Helm repo
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+        helm repo update
+      args:
+        executable: /bin/bash
+
+    - name: Ensure monitoring values directory exists on the remote host
+      copy:
+        src: "{{ playbook_dir }}/../helm/monitoring/"
+        dest: /home/ubuntu/monitoring-values/
+        owner: ubuntu
+        group: ubuntu
+        mode: "0755"
+
+    - name: Deploy kube-prometheus-stack
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        helm upgrade --install prometheus \
+          prometheus-community/kube-prometheus-stack \
+          --namespace {{ monitoring_namespace }} \
+          -f /home/ubuntu/monitoring-values/values.yaml
+      args:
+        executable: /bin/bash
+
+    - name: Create Grafana dashboard ConfigMap
+      become_user: ubuntu
+      environment:
+        KUBECONFIG: /home/ubuntu/.kube/config
+      shell: |
+        kubectl create configmap minecraft-dashboard \
+          --from-file=minecraft-dashboard.json=/home/ubuntu/monitoring-values/dashboards/minecraft-dashboard.json \
+          -n {{ monitoring_namespace }} --dry-run=client -o yaml | \
+        kubectl label -f - grafana_dashboard=1 --local -o yaml | \
+        kubectl apply -f -
+      args:
+        executable: /bin/bash
+
+    # -----------------------------------------------------------------
+    # 8️⃣  Deploy Minecraft Helm Chart
     # -----------------------------------------------------------------
     - name: Clean stale Helm chart directory on remote
       file:
@@ -226,7 +287,7 @@
       changed_when: false
 
     # -----------------------------------------------------------------
-    # 8️⃣  Backup Logic
+    # 9️⃣  Backup Logic
     # -----------------------------------------------------------------
     - name: Create backup script
       copy:
